@@ -5,36 +5,56 @@
  */
 #include <SPI.h>
 #include <WiFi.h>
+#include <Time.h>  
+#include <ArduinoJson.h>
 
 //-------- WIFI SETTINGS ------- //
 // EDIT: Change the 'ssid' and 'password' to match your network
-char ssid[] = "SSD";  // wireless network name
-char password[] = "PASSWORD"; // wireless password
+char ssid[] = "AH";  // wireless network name
+char password[] = "1135face"; // wireless password
 int status = WL_IDLE_STATUS;
 WiFiClient client;
 
 
 // ------ SERVER SETTINGS -------- //
 // EDIT: 'Server' address to match your domain
-byte server[] = { 192, 168, 8, 101 }; // IP of server
+byte server[] = { 192, 168, 8, 100 }; // IP of server
 int port = 8888;
 
 //-------- DATA SETTINGS ------- //
 // This is the data that will be passed into your POST and matches your mysql column
-int yourarduinodata = 999;
+StaticJsonBuffer<200> jsonBuffer;
+JsonObject& root = jsonBuffer.createObject();
+JsonArray& data = root.createNestedArray("data");
 String yourdatacolumn = "data=";
 String yourdata;
-
 
 //-------- RESPONCE SETTINGS ------- //
 char inString[500]; // string for incoming serial data
 int stringPos = 0; // string index counter
 unsigned long time;
 char c;
-unsigned long lastConnectionTime = 0; // last time you connected to the server, in milliseconds
-boolean lastConnected = false; // state of the connection last time through the main loop
-const unsigned long postingInterval = 10 * 1000; // delay between updates, in milliseconds
+unsigned long lastConnectionTime = 0;            // last time you connected to the server, in milliseconds
+const unsigned long postingInterval = 30L * 1000L; // delay between updates, in milliseconds
 
+
+//-------- RIP SETTINGS ------- //
+//the time we give the sensor to calibrate (10-60 secs according to the datasheet)
+int calibrationTime = 10;        
+
+//the time when the sensor outputs a low impulse
+long unsigned int lowIn;         
+
+//the amount of milliseconds the sensor has to be low 
+//before we assume all motion has stopped
+long unsigned int pause = 2000;  
+
+boolean lockLow = true;
+boolean takeLowTime;  
+
+int pirPin = 3;    //the digital pin connected to the PIR sensor's output
+
+//
 
 
 void setup() {
@@ -45,44 +65,43 @@ void setup() {
   // You're connected now, so print out the status
   printWifiStatus();
   
-  postData();
- 
+  //Set time 
+  setTime(12,00,00,1,1,15); // Another way to set
+  lastConnectionTime = millis();
+ //Rip
+  pinMode(pirPin, INPUT);
+  digitalWrite(pirPin, LOW);
+
+  Serial.print("calibrating sensor ");
+    for(int i = 0; i < calibrationTime; i++){
+      Serial.print(".");
+      delay(1000);
+      }
+    Serial.println(" done");
+    Serial.println("SENSOR ACTIVE");
+    delay(50);
 }
 
 void loop() {
-
+  
    // Print the respnce back from server
   while (client.available()) {
 
-    c = client.read();
-
+     char c = client.read();
     Serial.write(c);
 
-    CheckingStatus();
-
   }
-
-  
-  if (!client.connected() && lastConnected) {
-
-    Serial.println();
-
-    Serial.println("disconnecting.");
-
-    client.stop();
-
-  }
+ // Serial.println();
+ 
 
   // Post data agian 
-    unsigned long currentMillis = millis();
-
-  if (!client.connected() && (currentMillis - lastConnectionTime  == postingInterval)) {
-
+if (millis() - lastConnectionTime > postingInterval) {
      postData();
-
   }
 
-  lastConnected = client.connected();
+
+  updaeRipValue();
+
 
 }
 
@@ -126,28 +145,30 @@ void printWifiStatus() {
 
 // This method makes a HTTP connection to the server and POSTs data
 void postData() {
-  // Combine yourdatacolumn header (yourdata=) with the data recorded from your arduino
-  // (yourarduinodata) and package them into the String yourdata which is what will be
-  // sent in your POST request
-  yourdata = yourdatacolumn + yourarduinodata;
 
+   // close any connection before send a new request.
+  // This will free the socket on the WiFi shield
+  client.stop();
   // If there's a successful connection, send the HTTP POST request
   if (client.connect(server, port)) {
+    char body[256];
+    root.prettyPrintTo(body, sizeof(body));
+    yourdata = yourdatacolumn + body;
     Serial.println("connecting...");
-
+    Serial.println(yourdata);
     // EDIT: The POST 'URL' to the location of your insert_mysql.php on your web-host
     client.println("POST /api/data HTTP/1.1");
-
-    // EDIT: 'Host' to match your domain
-    client.println("Host: 192.168.8.101:8888");
+    client.println("Host: 192.168.8.100:8888");
     client.println("User-Agent: Arduino/1.0");
     client.println("Connection: close");
     client.println("Content-Type: application/x-www-form-urlencoded;");
     client.print("Content-Length: ");
     client.println(yourdata.length());
     client.println();
-    client.println(yourdata); 
-  
+    client.print(yourdata);
+    client.println(); 
+    clearJson();
+    lastConnectionTime = millis();
   } 
   else {
     // If you couldn't make a connection:
@@ -158,6 +179,65 @@ void postData() {
 }
 
 
+void updaeRipValue(){
+  if(digitalRead(pirPin) == HIGH){
+       if(lockLow){  
+         //makes sure we wait for a transition to LOW before any further output is made:
+         addCurrentTimeToJson("1");
+         lockLow = false;            
+         Serial.println("---");
+         Serial.print("motion detected at ");
+         Serial.print(millis()/1000);
+         Serial.println(" sec"); 
+         delay(50);
+         }         
+         takeLowTime = true;
+       }
+
+     if(digitalRead(pirPin) == LOW){       
+
+       if(takeLowTime){
+        lowIn = millis();          //save the time of the transition from high to LOW
+        takeLowTime = false;       //make sure this is only done at the start of a LOW phase
+        }
+       //if the sensor is low for more than the given pause, 
+       //we assume that no more motion is going to happen
+       if(!lockLow && millis() - lowIn > pause){  
+           //makes sure this block of code is only executed again after 
+           //a new motion sequence has been detected
+           addCurrentTimeToJson("0");
+           lockLow = true;                        
+           Serial.print("motion ended at ");      //output
+           Serial.print((millis() - pause)/1000);
+           Serial.println(" sec");
+           delay(50);
+           }
+       }
+}
+
+void clearJson(){
+  jsonBuffer = StaticJsonBuffer<200>();
+  JsonObject& root = jsonBuffer.createObject();
+  JsonArray& data = root.createNestedArray("data");
+
+}
+
+void addCurrentTimeToJson(String value){
+  // digital clock display of the time
+ 
+  String currentTime = ((String)year()+"-"+month()+"-"+day()+" "+hour())+printDigits(minute())+printDigits(second());
+  String upldValue = value+","+currentTime;
+  data.add(upldValue);  // 6 is the number of decimals to print
+}
+
+String printDigits(int digits){
+  // utility function for digital clock display: prints preceding colon and leading 0
+  String digit = ":";
+  if(digits < 10)
+    digit+= "0";
+  digit+=digits;
+  return digit;
+}
 
 
 void CheckingStatus() {
