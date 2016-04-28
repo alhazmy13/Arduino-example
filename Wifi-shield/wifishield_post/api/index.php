@@ -31,13 +31,20 @@ $app->post('/data', function() use ($app) {
 $app->get('/data', function() use ($app) {
 
 $file = fopen("data.csv","r");
-$result = array();
+$result["data"] = array();
 while(! feof($file))
   {
-  array_push($result,fgetcsv($file));
+  	$row = fgetcsv($file);
+  	if(count($row) == 1 and $row[0] === null) 
+      { 
+         continue;  // skip empty rows 
+      } 
+      $test["status"] = $row[0];
+      $test["date"] = $row[1];
+  	array_push($result["data"],$test);
   }
 
-echo '{"data":'.json_encode($result)."}";
+echo json_encode($result);
 fclose($file);
 
 });
